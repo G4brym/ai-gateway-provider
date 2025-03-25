@@ -8,6 +8,8 @@ import { FetchFunction } from '@ai-sdk/provider-utils'
 
 export class AiGatewayInternalFetchError extends Error {}
 
+export class AiGatewayDoesNotExist extends Error {}
+
 export class AiGatewayUnauthorizedError extends Error {}
 
 async function streamToObject(stream: ReadableStream) {
@@ -124,46 +126,67 @@ export class AiGatewayChatLanguageModel implements LanguageModelV1 {
       }
     }
 
-    const body = JSON.stringify(
-      await Promise.all(
-        requests.map(async (req) => {
-          let providerConfig = null
-          for (const provider of ProvidersConfigs) {
-            if (req.url.includes(provider.url)) {
-              providerConfig = provider
-            }
+    const body = await Promise.all(
+      requests.map(async (req) => {
+        let providerConfig = null
+        for (const provider of ProvidersConfigs) {
+          if (req.url.includes(provider.url)) {
+            providerConfig = provider
           }
+        }
 
-          if (!providerConfig) {
-            throw new Error(
-              `Sorry, but provider "${req.modelProvider}" is currently not supported, please open a issue in the github repo!`
-            )
-          }
+        if (!providerConfig) {
+          throw new Error(
+            `Sorry, but provider "${req.modelProvider}" is currently not supported, please open a issue in the github repo!`
+          )
+        }
 
-          if (!req.request.body) {
-            throw new Error(`Ai Gateway provider received an unexpected empty body`)
-          }
+        if (!req.request.body) {
+          throw new Error(`Ai Gateway provider received an unexpected empty body`)
+        }
 
-          return {
-            provider: providerConfig.name,
-            endpoint: req.url.replace(providerConfig.url, ''),
-            headers: req.request.headers,
-            query: await streamToObject(req.request.body),
-          }
-        })
-      )
+        return {
+          provider: providerConfig.name,
+          endpoint: req.url.replace(providerConfig.url, ''),
+          headers: req.request.headers,
+          query: await streamToObject(req.request.body),
+        }
+      })
     )
 
-    const resp = await fetch(`https://gateway.ai.cloudflare.com/v1/${this.config.accountId}/${this.config.gateway}`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'cf-aig-authorization': `Bearer ${this.config.apiKey}`,
-      },
-      body: body,
-    })
+    const headers = parseAiGatewayOptions(this.config.options ?? {})
 
-    if (resp.status === 401) {
+    let resp: Response
+    if ('binding' in this.config) {
+      let updatedBody = body.map((obj) => {
+        return {
+          ...obj,
+          headers: {
+            ...(obj.headers ?? {}),
+            ...Object.fromEntries(headers.entries()),
+          },
+        }
+      })
+
+      resp = await this.config.binding.run(updatedBody)
+    } else {
+      headers.set('Content-Type', 'application/json')
+      headers.set('cf-aig-authorization', `Bearer ${this.config.apiKey}`)
+
+      resp = await fetch(`https://gateway.ai.cloudflare.com/v1/${this.config.accountId}/${this.config.gateway}`, {
+        method: 'POST',
+        headers: headers,
+        body: JSON.stringify(body),
+      })
+    }
+
+    if (resp.status === 400) {
+      const cloneResp = resp.clone()
+      const result: { success?: boolean; error?: { code: number; message: string }[] } = await cloneResp.json()
+      if (result.success === false && result.error && result.error.length > 0 && result.error[0]?.code === 2001) {
+        throw new AiGatewayDoesNotExist('This AI gateway does not exist')
+      }
+    } else if (resp.status === 401) {
       const cloneResp = resp.clone()
       const result: { success?: boolean; error?: { code: number; message: string }[] } = await cloneResp.json()
       if (result.success === false && result.error && result.error.length > 0 && result.error[0]?.code === 2009) {
@@ -193,18 +216,39 @@ export interface AiGateway {
   chat(models: LanguageModelV1 | LanguageModelV1[]): LanguageModelV1
 }
 
-export type AiGatewaySettings = {
-  //   binding: any;
-  //   gateway: string;
-  // } | {
+export type AiGatewayReties = {
+  maxAttempts?: 1 | 2 | 3 | 4 | 5
+  retryDelayMs?: number
+  backoff?: 'constant' | 'linear' | 'exponential'
+}
+export type AiGatewayOptions = {
+  cacheKey?: string
+  cacheTtl?: number
+  skipCache?: boolean
+  metadata?: Record<string, number | string | boolean | null | bigint>
+  collectLog?: boolean
+  eventId?: string
+  requestTimeoutMs?: number
+  retries?: AiGatewayReties
+}
+export type AiGatewayAPISettings = {
   gateway: string
   accountId: string
   apiKey?: string
+  options?: AiGatewayOptions
 }
+export type AiGatewayBindingSettings = {
+  binding: {
+    run(data: unknown): Promise<Response>
+  }
+  options?: AiGatewayOptions
+}
+export type AiGatewaySettings = AiGatewayAPISettings | AiGatewayBindingSettings
 
 export function createAiGateway(options: AiGatewaySettings): AiGateway {
-  const createChatModel = (models: LanguageModelV1 | LanguageModelV1[]) =>
-    new AiGatewayChatLanguageModel(Array.isArray(models) ? models : [models], options)
+  const createChatModel = (models: LanguageModelV1 | LanguageModelV1[]) => {
+    return new AiGatewayChatLanguageModel(Array.isArray(models) ? models : [models], options)
+  }
 
   const provider = function (models: LanguageModelV1 | LanguageModelV1[]) {
     return createChatModel(models)
@@ -213,4 +257,50 @@ export function createAiGateway(options: AiGatewaySettings): AiGateway {
   provider.chat = createChatModel
 
   return provider
+}
+
+export function parseAiGatewayOptions(options: AiGatewayOptions): Headers {
+  const headers = new Headers()
+
+  if (options.skipCache === true) {
+    headers.set('cf-skip-cache', 'true')
+  }
+
+  if (options.cacheTtl) {
+    headers.set('cf-cache-ttl', options.cacheTtl.toString())
+  }
+
+  if (options.metadata) {
+    headers.set('cf-aig-metadata', JSON.stringify(options.metadata))
+  }
+
+  if (options.cacheKey) {
+    headers.set('cf-aig-cache-key', options.cacheKey)
+  }
+
+  if (options.collectLog !== undefined) {
+    headers.set('cf-aig-collect-log', options.collectLog === true ? 'true' : 'false')
+  }
+
+  if (options.eventId !== undefined) {
+    headers.set('cf-aig-event-id', options.eventId)
+  }
+
+  if (options.requestTimeoutMs !== undefined) {
+    headers.set('cf-aig-request-timeout', options.requestTimeoutMs.toString())
+  }
+
+  if (options.retries !== undefined) {
+    if (options.retries.maxAttempts !== undefined) {
+      headers.set('cf-aig-max-attempts', options.retries.maxAttempts.toString())
+    }
+    if (options.retries.retryDelayMs !== undefined) {
+      headers.set('cf-aig-retry-delay', options.retries.retryDelayMs.toString())
+    }
+    if (options.retries.backoff !== undefined) {
+      headers.set('cf-aig-backoff', options.retries.backoff)
+    }
+  }
+
+  return headers
 }
