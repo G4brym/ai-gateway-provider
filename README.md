@@ -53,6 +53,11 @@ const {text} = await generateText({
 
 ### Cloudflare AI Binding Example
 
+Binding Benefits:
+- Faster Requests: Saves milliseconds by avoiding open internet routing.
+- Enhanced Security: Uses a special pre-authenticated pipeline.
+- No API Key Required: Authentication is handled by the binding.
+
 ```typescript
 const aigateway = createAiGateway({
   binding: env.AI.gateway('my-gateway'),
