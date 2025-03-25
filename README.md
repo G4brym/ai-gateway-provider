@@ -41,8 +41,8 @@ const openai = createOpenAI({apiKey: 'openai api key'});
 const anthropic = createAnthropic({apiKey: 'anthropic api key'});
 
 const model = aigateway([
-  anthropic('claude-3-5-haiku-20241022'),
-  openai("gpt-4o-mini"),
+  anthropic('claude-3-5-haiku-20241022'),  // Primary choice
+  openai("gpt-4o-mini"),                   // Fallback if first fails
 ]);
 
 const {text} = await generateText({
@@ -64,6 +64,18 @@ const aigateway = createAiGateway({
   options: {  // Optional per-request override
     skipCache: true
   }
+});
+const openai = createOpenAI({apiKey: 'openai api key'});
+const anthropic = createAnthropic({apiKey: 'anthropic api key'});
+
+const model = aigateway([
+  anthropic('claude-3-5-haiku-20241022'),  // Primary choice
+  openai("gpt-4o-mini"),                   // Fallback if first fails
+]);
+
+const {text} = await generateText({
+  model: model,
+  prompt: 'Write a vegetarian lasagna recipe for 4 people.',
 });
 ```
 
