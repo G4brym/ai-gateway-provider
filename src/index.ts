@@ -1,10 +1,10 @@
-import {
+import type {
   LanguageModelV1,
   LanguageModelV1CallOptions,
   LanguageModelV1CallWarning,
   LanguageModelV1StreamPart,
 } from '@ai-sdk/provider'
-import { FetchFunction } from '@ai-sdk/provider-utils'
+import type { FetchFunction } from '@ai-sdk/provider-utils'
 
 export class AiGatewayInternalFetchError extends Error {}
 
@@ -86,21 +86,13 @@ export class AiGatewayChatLanguageModel implements LanguageModelV1 {
     this.config = config
   }
 
-  doStream(options: LanguageModelV1CallOptions): PromiseLike<{
-    stream: ReadableStream<LanguageModelV1StreamPart>
-    rawCall: { rawPrompt: unknown; rawSettings: Record<string, unknown> }
-    rawResponse?: { headers?: Record<string, string> }
-    request?: { body?: string }
-    warnings?: Array<LanguageModelV1CallWarning>
-  }> {
-    throw new Error('Method not implemented.')
-  }
-
-  async doGenerate(
-    options: Parameters<LanguageModelV1['doGenerate']>[0]
-  ): Promise<Awaited<ReturnType<LanguageModelV1['doGenerate']>>> {
+  async processModelRequest<T extends LanguageModelV1['doStream'] | LanguageModelV1['doGenerate']>(
+    options: Parameters<T>[0],
+    modelMethod: 'doStream' | 'doGenerate'
+  ): Promise<Awaited<ReturnType<T>>> {
     const requests: { url: string; request: Request; modelProvider: string }[] = []
 
+    // Model configuration and request collection
     for (const model of this.models) {
       if (!model.config || !Object.keys(model.config).includes('fetch')) {
         throw new Error(
@@ -118,7 +110,7 @@ export class AiGatewayChatLanguageModel implements LanguageModelV1 {
       }
 
       try {
-        await model.doGenerate(options)
+        await model[modelMethod](options)
       } catch (e) {
         if (!(e instanceof AiGatewayInternalFetchError)) {
           throw e
@@ -126,6 +118,7 @@ export class AiGatewayChatLanguageModel implements LanguageModelV1 {
       }
     }
 
+    // Process requests
     const body = await Promise.all(
       requests.map(async (req) => {
         let providerConfig = null
@@ -142,7 +135,7 @@ export class AiGatewayChatLanguageModel implements LanguageModelV1 {
         }
 
         if (!req.request.body) {
-          throw new Error(`Ai Gateway provider received an unexpected empty body`)
+          throw new Error('Ai Gateway provider received an unexpected empty body')
         }
 
         return {
@@ -154,25 +147,22 @@ export class AiGatewayChatLanguageModel implements LanguageModelV1 {
       })
     )
 
+    // Handle response
     const headers = parseAiGatewayOptions(this.config.options ?? {})
-
     let resp: Response
-    if ('binding' in this.config) {
-      let updatedBody = body.map((obj) => {
-        return {
-          ...obj,
-          headers: {
-            ...(obj.headers ?? {}),
-            ...Object.fromEntries(headers.entries()),
-          },
-        }
-      })
 
+    if ('binding' in this.config) {
+      const updatedBody = body.map((obj) => ({
+        ...obj,
+        headers: {
+          ...(obj.headers ?? {}),
+          ...Object.fromEntries(headers.entries()),
+        },
+      }))
       resp = await this.config.binding.run(updatedBody)
     } else {
       headers.set('Content-Type', 'application/json')
       headers.set('cf-aig-authorization', `Bearer ${this.config.apiKey}`)
-
       resp = await fetch(`https://gateway.ai.cloudflare.com/v1/${this.config.accountId}/${this.config.gateway}`, {
         method: 'POST',
         headers: headers,
@@ -180,6 +170,7 @@ export class AiGatewayChatLanguageModel implements LanguageModelV1 {
       })
     }
 
+    // Error handling
     if (resp.status === 400) {
       const cloneResp = resp.clone()
       const result: { success?: boolean; error?: { code: number; message: string }[] } = await cloneResp.json()
@@ -196,8 +187,7 @@ export class AiGatewayChatLanguageModel implements LanguageModelV1 {
       }
     }
 
-    const step = parseInt(resp.headers.get('cf-aig-step') ?? '0')
-
+    const step = Number.parseInt(resp.headers.get('cf-aig-step') ?? '0')
     if (!this.models[step]) {
       throw new Error('Unexpected AI Gateway Error')
     }
@@ -206,7 +196,20 @@ export class AiGatewayChatLanguageModel implements LanguageModelV1 {
       ...this.models[step].config,
       fetch: (url, req) => resp as unknown as Promise<Response>,
     }
-    return this.models[step].doGenerate(options)
+
+    return this.models[step][modelMethod](options) as Promise<Awaited<ReturnType<T>>>
+  }
+
+  async doStream(
+    options: Parameters<LanguageModelV1['doStream']>[0]
+  ): Promise<Awaited<ReturnType<LanguageModelV1['doStream']>>> {
+    return this.processModelRequest<LanguageModelV1['doStream']>(options, 'doStream')
+  }
+
+  async doGenerate(
+    options: Parameters<LanguageModelV1['doGenerate']>[0]
+  ): Promise<Awaited<ReturnType<LanguageModelV1['doGenerate']>>> {
+    return this.processModelRequest<LanguageModelV1['doGenerate']>(options, 'doGenerate')
   }
 }
 
@@ -250,9 +253,7 @@ export function createAiGateway(options: AiGatewaySettings): AiGateway {
     return new AiGatewayChatLanguageModel(Array.isArray(models) ? models : [models], options)
   }
 
-  const provider = function (models: LanguageModelV1 | LanguageModelV1[]) {
-    return createChatModel(models)
-  }
+  const provider = (models: LanguageModelV1 | LanguageModelV1[]) => createChatModel(models)
 
   provider.chat = createChatModel
 
