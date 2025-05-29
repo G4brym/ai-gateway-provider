@@ -1,8 +1,11 @@
-# AI Gateway Provider for Vercel AI SDK
+# Project Repository Moved
 
 > **Important Notice**: This project has been adopted by Cloudflare and is now maintained in the official Cloudflare AI repository. The latest version and ongoing development can be found at [github.com/cloudflare/ai](https://github.com/cloudflare/ai/tree/main/packages/ai-gateway-provider). Please use the new repository for the most up-to-date code, issues, and contributions.
 
 ___________
+
+
+# AI Gateway Provider for Vercel AI SDK
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
